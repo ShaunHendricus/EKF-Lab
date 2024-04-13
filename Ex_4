@@ -1,0 +1,223 @@
+
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy.optimize
+from numpy.linalg import inv
+
+# Robot parameters
+wheel_base = 120  # in mm
+wheel_radius = 10  # in mm
+robot_speed = 20  # in mm/s
+encoder_variance = 0  # No noise for the ideal path
+dt = 1/10  # Control input interval at 10 Hz
+
+# Control function to return wheel speeds for straight line and turns
+def get_control_input(scan_length, spacing, passes, robot_speed, wheel_base):
+    control_input = []
+    for pass_ in range(passes):
+        # Move straight for scan_length
+        control_input.extend([(robot_speed, robot_speed)] * int(scan_length / (robot_speed * dt)))
+        # Turn at the end of the scan length if it's not the last pass
+        if pass_ < passes - 1:
+            if pass_ % 2 == 0:
+                # Turn left
+                control_input.extend([(-robot_speed, robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            else:
+                # Turn right
+                control_input.extend([(robot_speed, -robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            # Move straight for spacing
+            control_input.extend([(robot_speed, robot_speed)] * int(spacing / (robot_speed * dt)))
+            if pass_ % 2 == 0:
+                # Turn left
+                control_input.extend([(-robot_speed, robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            else:
+                # Turn right
+                control_input.extend([(robot_speed, -robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+    return control_input
+
+# Robot kinematics to calculate the new position
+def kinematics(pos, theta, control, dt, wheel_radius):
+    vl, vr = control
+    # Convert wheel speeds to linear velocity and angular velocity
+    v = (vl + vr) / 2
+    omega = (vr - vl) / wheel_base
+    # Compute new position and orientation
+    delta_theta = omega * dt
+    new_theta = theta + delta_theta
+    dx = (v * np.cos(new_theta)) * dt
+    dy = (v * np.sin(new_theta)) * dt
+    new_x = pos[0] + dx
+    new_y = pos[1] + dy
+    return (new_x, new_y), new_theta
+
+# Main simulation function to get the robot path
+def simulate_robot_path(control_input, dt, wheel_radius):
+    trajectory = [(-250, -250)]  # Starting position
+    theta = 0  # Starting orientation
+    for control in control_input:
+        new_pos, theta = kinematics(trajectory[-1], theta, control, dt, wheel_radius)
+        trajectory.append(new_pos)
+    return trajectory
+
+# Function to add Gaussian noise to control input
+def add_noise_to_control_input(control_input, variance):
+    return [(np.random.normal(vl, np.sqrt(variance)), np.random.normal(vr, np.sqrt(variance)))
+            for vl, vr in control_input]
+
+# Define beacon positions
+beacons = {
+    'B1': np.array([2500, 1000]),
+    'B2': np.array([-2500, 1000]),
+    'B3': np.array([2500, -2500])
+}
+
+# Function to calculate distance between two points
+# Function to calculate distance between two points
+def euclidean_distance(point1, point2):
+    return np.sqrt((point1[0] - point2[0]) ** 2 + (point1[1] - point2[1]) ** 2)
+
+# Function to simulate beacon measurements with noise
+def simulate_beacon_measurements(trajectory, beacons, beacon_noise_variance):
+    measurements = []
+    for position in trajectory:
+        measurement = {}
+        for beacon_name, beacon_position in beacons.items():
+            true_distance = euclidean_distance(position, beacon_position)
+            # Add Gaussian noise to the true distance
+            noisy_distance = np.random.normal(true_distance, np.sqrt(beacon_noise_variance))
+            measurement[beacon_name] = noisy_distance
+        measurements.append(measurement)
+    return measurements
+
+# Function to estimate position using trilateration from beacon measurements
+def trilateration(beacon_measurements, beacons):
+    estimated_positions = []
+    for measurement in beacon_measurements:
+        # Use nonlinear least squares to estimate the robot's position
+        def equations(variables):
+            x, y = variables
+            equations = []
+            for beacon_name, beacon_position in beacons.items():
+                predicted_distance = euclidean_distance((x, y), beacon_position)
+                equations.append(predicted_distance - measurement[beacon_name])
+            return equations
+
+        # Initial guess for the robot's position (could be improved with a better estimate)
+        initial_guess = (0, 0)
+        estimated_position, _ = scipy.optimize.leastsq(equations, initial_guess)
+        estimated_positions.append(estimated_position)
+    return estimated_positions
+
+# Generate control inputs for the raster scan
+control_input = get_control_input(2000, 150, 7, robot_speed, wheel_base)
+
+# Simulate the robot path
+trajectory = simulate_robot_path(control_input, dt, wheel_radius)
+
+# Extract the x and y coordinates
+x_coords, y_coords = zip(*trajectory)
+
+# Generate control inputs with noise for the raster scan
+noisy_control_input = add_noise_to_control_input(control_input, 0.1)  # Encoder noise variance
+
+# Simulate the robot path with noise
+noisy_trajectory = simulate_robot_path(noisy_control_input, dt, wheel_radius)
+
+# Extract the x and y coordinates for the noisy trajectory
+noisy_x_coords, noisy_y_coords = zip(*noisy_trajectory)
+
+# Simulate beacon measurements
+beacon_noise_variance = 20  # in mm^2
+beacon_measurements = simulate_beacon_measurements(trajectory, beacons, beacon_noise_variance)
+
+# Estimate positions from beacon measurements
+estimated_positions = trilateration(beacon_measurements, beacons)
+
+# Extract the x and y coordinates for the estimated positions
+estimated_x_coords, estimated_y_coords = zip(*estimated_positions)
+
+# EKF specific functions and simulation loop
+def ekf_predict(state, control, state_covariance, wheel_base, dt, process_noise_covariance):
+    # Predict the next state based on the motion model
+    new_state, theta = kinematics((state[0], state[1]), state[2], control, dt, wheel_radius)
+    new_state = np.array([new_state[0], new_state[1], theta])
+
+    # Calculate the Jacobian of the motion model (G)
+    G = np.array([
+        [1, 0, -dt * (control[0] + control[1]) / 2 * np.sin(state[2] + dt * (control[1] - control[0]) / (2 * wheel_base))],
+        [0, 1,  dt * (control[0] + control[1]) / 2 * np.cos(state[2] + dt * (control[1] - control[0]) / (2 * wheel_base))],
+        [0, 0, 1]
+    ])
+    
+    # Predict the new error covariance
+    new_state_covariance = G @ state_covariance @ G.T + process_noise_covariance
+    return new_state, new_state_covariance
+
+def ekf_update(state, state_covariance, measurement, beacons, measurement_noise_covariance):
+    # Compute expected measurement and Jacobian (H) for each beacon
+    H = np.zeros((3, 3))
+    expected_measurement = np.zeros(3)
+    for i, (beacon_name, beacon_position) in enumerate(beacons.items()):
+        expected_measurement[i] = euclidean_distance((state[0], state[1]), beacon_position)
+        dx = state[0] - beacon_position[0]
+        dy = state[1] - beacon_position[1]
+        H[i] = [dx / expected_measurement[i], dy / expected_measurement[i], 0]
+
+    # Compute the measurement residual (difference between expected and actual measurement)
+    measurement_residual = np.array([
+        measurement['B1'],
+        measurement['B2'],
+        measurement['B3']
+    ]) - expected_measurement
+
+    # Compute the Kalman gain
+    S = H @ state_covariance @ H.T + measurement_noise_covariance
+    K = state_covariance @ H.T @ inv(S)
+
+    # Update the state and covariance with the measurement
+    new_state = state + K @ measurement_residual
+    new_state_covariance = (np.eye(3) - K @ H) @ state_covariance
+
+    return new_state, new_state_covariance
+
+# Process noise and measurement noise covariance matrices
+process_noise_covariance = np.diag([0.1, 0.1, np.deg2rad(5)]) ** 2  # Assumed process noise for the motion model
+measurement_noise_covariance = np.diag([20, 20, 20])  # Measurement noise variance from the beacons
+
+# Initialize the EKF state and covariance matrix
+state = np.array([-250, -250, 0])  # Initial position (x, y) and orientation (theta)
+state_covariance = np.eye(3) * 0.01  # Small initial error covariance
+
+# Lists to hold EKF estimated states and covariances
+ekf_states = [state]
+ekf_covariances = [state_covariance]
+
+# EKF Loop over all control inputs and beacon measurements
+for control, measurement in zip(noisy_control_input, beacon_measurements):
+    # EKF Prediction
+    state, state_covariance = ekf_predict(state, control, state_covariance, wheel_base, dt, process_noise_covariance)
+
+    # EKF Update
+    state, state_covariance = ekf_update(state, state_covariance, measurement, beacons, measurement_noise_covariance)
+
+    # Save the state and covariance
+    ekf_states.append(state)
+    ekf_covariances.append(state_covariance)
+
+# Extract EKF estimated x and y coordinates
+ekf_x_coords, ekf_y_coords = zip(*[(state[0], state[1]) for state in ekf_states])
+
+# Plot the robot's true path, estimated (noisy) trajectory, beacon-based estimated positions, and EKF estimated path
+plt.figure(figsize=(12, 8))
+plt.plot(x_coords, y_coords, label='True Robot Path', marker='o')
+plt.plot(noisy_x_coords, noisy_y_coords, label='Estimated (Noisy) Robot Path', linestyle='--', marker='x')
+#plt.plot(estimated_x_coords, estimated_y_coords, label='Beacon-based Estimated Position', linestyle=':', marker='^')
+plt.plot(ekf_x_coords, ekf_y_coords, label='EKF Estimated Path', linestyle='-.', marker='s')
+plt.title('EKF Robots Position')
+plt.xlabel('X Position (mm)')
+plt.ylabel('Y Position (mm)')
+legend = plt.legend() 
+legend.set_draggable(True)
+plt.grid(True)
+plt.show()
+
