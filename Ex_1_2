@@ -1,0 +1,92 @@
+#Exercise 1 and 2
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# variables
+wheel_base = 120  
+wheel_radius = 10  
+robot_speed = 20  
+encoder_variance = 0  # No noise for the ideal path
+dt = 1/10  #control 10hz
+
+# function for straight lines and tunrs
+def get_control_input(scan_length, spacing, passes, robot_speed, wheel_base):
+    control_input = []
+    for pass_ in range(passes):
+        control_input.extend([(robot_speed, robot_speed)] * int(scan_length / (robot_speed * dt)))
+        if pass_ < passes - 1:
+            if pass_ % 2 == 0:
+                # left
+                control_input.extend([(-robot_speed, robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            else:
+                # right
+                control_input.extend([(robot_speed, -robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            # straight for 2000mm
+            control_input.extend([(robot_speed, robot_speed)] * int(spacing / (robot_speed * dt)))
+            if pass_ % 2 == 0:
+                # left
+                control_input.extend([(-robot_speed, robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            else:
+                # right
+                control_input.extend([(robot_speed, -robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+    return control_input
+
+# kinematics to calculate new position
+def kinematics(pos, theta, control, dt, wheel_radius):
+    vl, vr = control
+    # wheels to linear and angular vel
+    v = (vl + vr) / 2
+    omega = (vr - vl) / wheel_base
+    # new pos and rotation
+    delta_theta = omega * dt
+    new_theta = theta + delta_theta
+    dx = (v * np.cos(new_theta)) * dt
+    dy = (v * np.sin(new_theta)) * dt
+    new_x = pos[0] + dx
+    new_y = pos[1] + dy
+    return (new_x, new_y), new_theta
+
+# Main simulation function to get the robot path
+def simulate_robot_path(control_input, dt, wheel_radius):
+    trajectory = [(-250, -250)]  # Starting position
+    theta = 0  # Starting orientation
+    for control in control_input:
+        new_pos, theta = kinematics(trajectory[-1], theta, control, dt, wheel_radius)
+        trajectory.append(new_pos)
+    return trajectory
+
+# Function to add Gaussian noise to control input
+def add_noise_to_control_input(control_input, variance):
+    return [(np.random.normal(vl, np.sqrt(variance)), np.random.normal(vr, np.sqrt(variance)))
+            for vl, vr in control_input]
+
+# Generate control inputs for the raster scan
+control_input = get_control_input(2000, 150, 7, robot_speed, wheel_base)
+
+# Simulate the robot path
+trajectory = simulate_robot_path(control_input, dt, wheel_radius)
+
+# Extract the x and y coordinates
+x_coords, y_coords = zip(*trajectory)
+
+# Generate control inputs with noise for the raster scan
+noisy_control_input = add_noise_to_control_input(control_input, 0.1)  # Encoder noise variance
+
+# Simulate the robot path with noise
+noisy_trajectory = simulate_robot_path(noisy_control_input, dt, wheel_radius)
+
+# Extract the x and y coordinates for the noisy trajectory
+noisy_x_coords, noisy_y_coords = zip(*noisy_trajectory)
+
+# Plot the robot's true and estimated (noisy) trajectories
+plt.figure(figsize=(12, 8))
+plt.plot(x_coords, y_coords, label='True Robot Path', marker='o', linewidth = 5)
+plt.plot(noisy_x_coords, noisy_y_coords, label='Estimated (Noisy) Robot Path', linestyle='--', marker='x')
+plt.title('True and Noisy Trajectory  of Robot')
+plt.xlabel('X Position (mm)')
+plt.ylabel('Y Position (mm)')
+legend = plt.legend() 
+legend.set_draggable(True)
+plt.grid(True)
+plt.show()
