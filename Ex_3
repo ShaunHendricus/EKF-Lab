@@ -1,0 +1,148 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy.optimize
+
+# Robot parameters
+wheel_base = 120  # in mm
+wheel_radius = 10  # in mm
+robot_speed = 20  # in mm/s
+encoder_variance = 0  # No noise for the ideal path
+dt = 1/10  # Control input interval at 10 Hz
+
+# Control function to return wheel speeds for straight line and turns
+def get_control_input(scan_length, spacing, passes, robot_speed, wheel_base):
+    control_input = []
+    for pass_ in range(passes):
+        # Move straight for scan_length
+        control_input.extend([(robot_speed, robot_speed)] * int(scan_length / (robot_speed * dt)))
+        # Turn at the end of the scan length if it's not the last pass
+        if pass_ < passes - 1:
+            if pass_ % 2 == 0:
+                # Turn left
+                control_input.extend([(-robot_speed, robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            else:
+                # Turn right
+                control_input.extend([(robot_speed, -robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            # Move straight for spacing
+            control_input.extend([(robot_speed, robot_speed)] * int(spacing / (robot_speed * dt)))
+            if pass_ % 2 == 0:
+                # Turn left
+                control_input.extend([(-robot_speed, robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+            else:
+                # Turn right
+                control_input.extend([(robot_speed, -robot_speed)] * int((np.pi/2) * (wheel_base/2) / (robot_speed * dt)))
+    return control_input
+
+# Robot kinematics to calculate the new position
+def kinematics(pos, theta, control, dt, wheel_radius):
+    vl, vr = control
+    # Convert wheel speeds to linear velocity and angular velocity
+    v = (vl + vr) / 2
+    omega = (vr - vl) / wheel_base
+    # Compute new position and orientation
+    delta_theta = omega * dt
+    new_theta = theta + delta_theta
+    dx = (v * np.cos(new_theta)) * dt
+    dy = (v * np.sin(new_theta)) * dt
+    new_x = pos[0] + dx
+    new_y = pos[1] + dy
+    return (new_x, new_y), new_theta
+
+# Main simulation function to get the robot path
+def simulate_robot_path(control_input, dt, wheel_radius):
+    trajectory = [(-250, -250)]  # Starting position
+    theta = 0  # Starting orientation
+    for control in control_input:
+        new_pos, theta = kinematics(trajectory[-1], theta, control, dt, wheel_radius)
+        trajectory.append(new_pos)
+    return trajectory
+
+# Function to add Gaussian noise to control input
+def add_noise_to_control_input(control_input, variance):
+    return [(np.random.normal(vl, np.sqrt(variance)), np.random.normal(vr, np.sqrt(variance)))
+            for vl, vr in control_input]
+
+# Define beacon positions
+beacons = {
+    'B1': np.array([2500, 1000]),
+    'B2': np.array([-2500, 1000]),
+    'B3': np.array([2500, -2500])
+}
+
+# Function to calculate distance between two points
+def euclidean_distance(point1, point2):
+    return np.sqrt((point1[0] - point2[0]) ** 2 + (point1[1] - point2[1]) ** 2)
+
+# Function to simulate beacon measurements with noise
+def simulate_beacon_measurements(trajectory, beacons, beacon_noise_variance):
+    measurements = []
+    for position in trajectory:
+        measurement = {}
+        for beacon_name, beacon_position in beacons.items():
+            true_distance = euclidean_distance(position, beacon_position)
+            # Add Gaussian noise to the true distance
+            noisy_distance = np.random.normal(true_distance, np.sqrt(beacon_noise_variance))
+            measurement[beacon_name] = noisy_distance
+        measurements.append(measurement)
+    return measurements
+
+# Function to estimate position using trilateration from beacon measurements
+def trilateration(beacon_measurements, beacons):
+    estimated_positions = []
+    for measurement in beacon_measurements:
+        # Use nonlinear least squares to estimate the robot's position
+        def equations(variables):
+            x, y = variables
+            equations = []
+            for beacon_name, beacon_position in beacons.items():
+                predicted_distance = euclidean_distance((x, y), beacon_position)
+                equations.append(predicted_distance - measurement[beacon_name])
+            return equations
+
+        # Initial guess for the robot's position (could be improved with a better estimate)
+        initial_guess = (0, 0)
+        estimated_position, _ = scipy.optimize.leastsq(equations, initial_guess)
+        estimated_positions.append(estimated_position)
+    return estimated_positions
+
+# Generate control inputs for the raster scan
+control_input = get_control_input(2000, 150, 7, robot_speed, wheel_base)
+
+# Simulate the robot path
+trajectory = simulate_robot_path(control_input, dt, wheel_radius)
+
+# Extract the x and y coordinates
+x_coords, y_coords = zip(*trajectory)
+
+# Generate control inputs with noise for the raster scan
+noisy_control_input = add_noise_to_control_input(control_input, 0.1)  # Encoder noise variance
+
+# Simulate the robot path with noise
+noisy_trajectory = simulate_robot_path(noisy_control_input, dt, wheel_radius)
+
+# Extract the x and y coordinates for the noisy trajectory
+noisy_x_coords, noisy_y_coords = zip(*noisy_trajectory)
+
+# Simulate beacon measurements
+beacon_noise_variance = 20  # in mm^2
+beacon_measurements = simulate_beacon_measurements(trajectory, beacons, beacon_noise_variance)
+
+# Estimate positions from beacon measurements
+estimated_positions = trilateration(beacon_measurements, beacons)
+
+# Extract the x and y coordinates for the estimated positions
+estimated_x_coords, estimated_y_coords = zip(*estimated_positions)
+
+# Plot the robot's true path, estimated (noisy) trajectory, and beacon-based estimated positions
+plt.figure(figsize=(12, 8))
+plt.plot(x_coords, y_coords, label='True Robot Path', marker='o')
+#plt.plot(noisy_x_coords, noisy_y_coords, label='Estimated (Noisy) Robot Path', linestyle='--', marker='x')
+plt.plot(estimated_x_coords, estimated_y_coords, label='Beacon-based Estimated Position', linestyle=':', marker='^')
+plt.title('Beacon estimation of Robot''s position')
+plt.xlabel('X Position (mm)')
+plt.ylabel('Y Position (mm)')
+legend = plt.legend() 
+legend.set_draggable(True)
+plt.grid(True)
+plt.show()
+
